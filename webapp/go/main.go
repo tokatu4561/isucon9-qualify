@@ -557,6 +557,7 @@ func getNewItems(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// TODO: N + 1 の解消
 	itemSimples := []ItemSimple{}
 	for _, item := range items {
 		seller, err := getUserSimpleByID(dbx, item.SellerID)
