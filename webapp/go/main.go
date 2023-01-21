@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"time"
 
 	_ "net/http/pprof"
@@ -428,6 +429,41 @@ func getCategoryByID(q sqlx.Queryer, categoryID int) (category Category, err err
 	return category, err
 }
 
+func getCategories(q *sqlx.DB, categoryIds []int) ([]Category, error) {
+	var queryParam string
+	generic := make([]interface{}, 0)
+
+	for _, id := range categoryIds {
+		queryParam += "?,"
+		generic = append(generic, id)
+	}
+	if queryParam != "" {
+		queryParam = strings.TrimRight(queryParam, ",")
+	}
+
+	sql := fmt.Sprintf("SELECT * FROM `categories` WHERE `id` IN (%s)", queryParam)
+	categoriesData := []Category{}
+	err := q.Select(&categoriesData, sql, generic...)
+	if (err != nil) {
+		return nil, err
+	}
+
+	// カテゴリーに親カテゴリーがあれば、再帰的に大元のカテゴリー名までの紐付けを行う
+	categories := []Category{}
+	for _, category := range categoriesData {
+		if category.ParentID != 0 {
+			parentCategory, err := getCategoryByID(q, category.ParentID)
+			if err != nil {
+				return nil, err
+			}
+			category.ParentCategoryName = parentCategory.CategoryName
+		}
+		categories = append(categories, category)
+	}
+	
+	return categories, nil
+}
+
 func getConfigByName(name string) (string, error) {
 	config := Config{}
 	err := dbx.Get(&config, "SELECT * FROM `configs` WHERE `name` = ?", name)
@@ -566,7 +602,22 @@ func getNewItems(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// TODO: N + 1 の解消
+	// 商品とカテゴリーの紐付けのため、紐付けに必要なカテゴリーを全て取得しておく
+	ids := make(map[int]bool)
+	categoryIds := []int{}
+	for _, item := range items {
+		if _, value := ids[item.CategoryID]; !value {
+			ids[item.CategoryID] = true
+			categoryIds = append(categoryIds, item.CategoryID)
+		}
+	}
+	categories, err := getCategories(dbx, categoryIds)
+	if err != nil {
+		log.Println(err)
+		outputErrorMsg(w, http.StatusNotFound, "category not found")
+		return
+	}
+
 	itemSimples := []ItemSimple{}
 	for _, item := range items {
 		seller, err := getUserSimpleByID(dbx, item.SellerID)
@@ -574,11 +625,14 @@ func getNewItems(w http.ResponseWriter, r *http.Request) {
 			outputErrorMsg(w, http.StatusNotFound, "seller not found")
 			return
 		}
-		category, err := getCategoryByID(dbx, item.CategoryID)
-		if err != nil {
-			outputErrorMsg(w, http.StatusNotFound, "category not found")
-			return
+
+		var category Category
+		for _, cate := range categories {
+			if (item.CategoryID == cate.ID) {
+				category = cate
+			}
 		}
+		
 		itemSimples = append(itemSimples, ItemSimple{
 			ID:         item.ID,
 			SellerID:   item.SellerID,
