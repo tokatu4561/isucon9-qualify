@@ -417,6 +417,7 @@ func getUserSimpleByID(q sqlx.Queryer, userID int64) (userSimple UserSimple, err
 	return userSimple, err
 }
 
+// TODO: 重い 再帰も良くない
 func getCategoryByID(q sqlx.Queryer, categoryID int) (category Category, err error) {
 	err = sqlx.Get(q, &category, "SELECT * FROM `categories` WHERE `id` = ?", categoryID)
 	if category.ParentID != 0 {
@@ -437,11 +438,15 @@ func getCategories(q *sqlx.DB, categoryIds []int) ([]Category, error) {
 		queryParam += "?,"
 		generic = append(generic, id)
 	}
+
+	var sql string
 	if queryParam != "" {
 		queryParam = strings.TrimRight(queryParam, ",")
+		sql = fmt.Sprintf("SELECT * FROM `categories` WHERE `id` IN (%s)", queryParam)
+	} else {
+		sql = "SELECT * FROM `categories`"
 	}
 
-	sql := fmt.Sprintf("SELECT * FROM `categories` WHERE `id` IN (%s)", queryParam)
 	categoriesData := []Category{}
 	err := q.Select(&categoriesData, sql, generic...)
 	if (err != nil) {
@@ -532,7 +537,7 @@ func postInitialize(w http.ResponseWriter, r *http.Request) {
 	)
 	if err != nil {
 		log.Print(err)
-		outputErrorMsg(w, http.StatusInternalServerError, "db error")
+		outputErrorMsg(w, http.StatusInternalServerError, "itemSimplesdb error")
 		return
 	}
 
@@ -573,6 +578,7 @@ func getNewItems(w http.ResponseWriter, r *http.Request) {
 	items := []Item{}
 	if itemID > 0 && createdAt > 0 {
 		// paging
+		// TODO: 重い
 		err := dbx.Select(&items,
 			"SELECT * FROM `items` WHERE `status` IN (?,?) AND (`created_at` < ?  OR (`created_at` <= ? AND `id` < ?)) ORDER BY `created_at` DESC, `id` DESC LIMIT ?",
 			ItemStatusOnSale,
@@ -589,6 +595,7 @@ func getNewItems(w http.ResponseWriter, r *http.Request) {
 		}
 	} else {
 		// 1st page
+		// TODO: 重い status に index 欲しいかも
 		err := dbx.Select(&items,
 			"SELECT * FROM `items` WHERE `status` IN (?,?) ORDER BY `created_at` DESC, `id` DESC LIMIT ?",
 			ItemStatusOnSale,
@@ -613,7 +620,6 @@ func getNewItems(w http.ResponseWriter, r *http.Request) {
 	}
 	categories, err := getCategories(dbx, categoryIds)
 	if err != nil {
-		log.Println(err)
 		outputErrorMsg(w, http.StatusNotFound, "category not found")
 		return
 	}
@@ -662,6 +668,7 @@ func getNewItems(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(rni)
 }
 
+// TODO: 重いっぽい
 func getNewCategoryItems(w http.ResponseWriter, r *http.Request) {
 	rootCategoryIDStr := pat.Param(r, "root_category_id")
 	rootCategoryID, err := strconv.Atoi(rootCategoryIDStr)
@@ -709,6 +716,7 @@ func getNewCategoryItems(w http.ResponseWriter, r *http.Request) {
 	var inArgs []interface{}
 	if itemID > 0 && createdAt > 0 {
 		// paging
+		// TODO: 重い
 		inQuery, inArgs, err = sqlx.In(
 			"SELECT * FROM `items` WHERE `status` IN (?,?) AND category_id IN (?) AND (`created_at` < ?  OR (`created_at` <= ? AND `id` < ?)) ORDER BY `created_at` DESC, `id` DESC LIMIT ?",
 			ItemStatusOnSale,
@@ -749,6 +757,22 @@ func getNewCategoryItems(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 商品とカテゴリーの紐付けのため、紐付けに必要なカテゴリーを全て取得しておく
+	ids := make(map[int]bool)
+	categoryIds := []int{}
+	for _, item := range items {
+		if _, value := ids[item.CategoryID]; !value {
+			ids[item.CategoryID] = true
+			categoryIds = append(categoryIds, item.CategoryID)
+		}
+	}
+	categories, err := getCategories(dbx, categoryIds)
+	if err != nil {
+		log.Println(err)
+		outputErrorMsg(w, http.StatusNotFound, "category not found")
+		return
+	}
+
 	itemSimples := []ItemSimple{}
 	for _, item := range items {
 		seller, err := getUserSimpleByID(dbx, item.SellerID)
@@ -756,11 +780,13 @@ func getNewCategoryItems(w http.ResponseWriter, r *http.Request) {
 			outputErrorMsg(w, http.StatusNotFound, "seller not found")
 			return
 		}
-		category, err := getCategoryByID(dbx, item.CategoryID)
-		if err != nil {
-			outputErrorMsg(w, http.StatusNotFound, "category not found")
-			return
+		var category Category
+		for _, cate := range categories {
+			if (item.CategoryID == cate.ID) {
+				category = cate
+			}
 		}
+
 		itemSimples = append(itemSimples, ItemSimple{
 			ID:         item.ID,
 			SellerID:   item.SellerID,
@@ -864,12 +890,29 @@ func getUserItems(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// 商品とカテゴリーの紐付けのため、紐付けに必要なカテゴリーを全て取得しておく
+	ids := make(map[int]bool)
+	categoryIds := []int{}
+	for _, item := range items {
+		if _, value := ids[item.CategoryID]; !value {
+			ids[item.CategoryID] = true
+			categoryIds = append(categoryIds, item.CategoryID)
+		}
+	}
+	categories, err := getCategories(dbx, categoryIds)
+	if err != nil {
+		log.Println(err, categoryIds)
+		outputErrorMsg(w, http.StatusNotFound, "category not found")
+		return
+	}
+
 	itemSimples := []ItemSimple{}
 	for _, item := range items {
-		category, err := getCategoryByID(dbx, item.CategoryID)
-		if err != nil {
-			outputErrorMsg(w, http.StatusNotFound, "category not found")
-			return
+		var category Category
+		for _, cate := range categories {
+			if (item.CategoryID == cate.ID) {
+				category = cate
+			}
 		}
 		itemSimples = append(itemSimples, ItemSimple{
 			ID:         item.ID,
@@ -976,6 +1019,21 @@ func getTransactions(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// 商品とカテゴリーの紐付けのため、紐付けに必要なカテゴリーを全て取得しておく
+	ids := make(map[int]bool)
+	categoryIds := []int{}
+	for _, item := range items {
+		if _, value := ids[item.CategoryID]; !value {
+			ids[item.CategoryID] = true
+			categoryIds = append(categoryIds, item.CategoryID)
+		}
+	}
+	categories, err := getCategories(dbx, categoryIds)
+	if err != nil {
+		outputErrorMsg(w, http.StatusNotFound, "category not found")
+		return
+	}
+
 	itemDetails := []ItemDetail{}
 	for _, item := range items {
 		seller, err := getUserSimpleByID(tx, item.SellerID)
@@ -984,11 +1042,12 @@ func getTransactions(w http.ResponseWriter, r *http.Request) {
 			tx.Rollback()
 			return
 		}
-		category, err := getCategoryByID(tx, item.CategoryID)
-		if err != nil {
-			outputErrorMsg(w, http.StatusNotFound, "category not found")
-			tx.Rollback()
-			return
+
+		var category Category
+		for _, cate := range categories {
+			if (item.CategoryID == cate.ID) {
+				category = cate
+			}
 		}
 
 		itemDetail := ItemDetail{
