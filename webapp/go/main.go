@@ -578,7 +578,6 @@ func getNewItems(w http.ResponseWriter, r *http.Request) {
 	items := []Item{}
 	if itemID > 0 && createdAt > 0 {
 		// paging
-		// TODO: 重い
 		err := dbx.Select(&items,
 			"SELECT * FROM `items` WHERE `status` IN (?,?) AND (`created_at` < ?  OR (`created_at` <= ? AND `id` < ?)) ORDER BY `created_at` DESC, `id` DESC LIMIT ?",
 			ItemStatusOnSale,
@@ -595,7 +594,6 @@ func getNewItems(w http.ResponseWriter, r *http.Request) {
 		}
 	} else {
 		// 1st page
-		// TODO: 重い status に index 欲しいかも
 		err := dbx.Select(&items,
 			"SELECT * FROM `items` WHERE `status` IN (?,?) ORDER BY `created_at` DESC, `id` DESC LIMIT ?",
 			ItemStatusOnSale,
@@ -717,7 +715,6 @@ func getNewCategoryItems(w http.ResponseWriter, r *http.Request) {
 	var inArgs []interface{}
 	if itemID > 0 && createdAt > 0 {
 		// paging
-		// TODO: 重い
 		inQuery, inArgs, err = sqlx.In(
 			"SELECT * FROM `items` WHERE `status` IN (?,?) AND category_id IN (?) AND (`created_at` < ?  OR (`created_at` <= ? AND `id` < ?)) ORDER BY `created_at` DESC, `id` DESC LIMIT ?",
 			ItemStatusOnSale,
