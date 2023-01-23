@@ -85,9 +85,9 @@ type User struct {
 }
 
 type UserSimple struct {
-	ID           int64  `json:"id"`
-	AccountName  string `json:"account_name"`
-	NumSellItems int    `json:"num_sell_items"`
+	ID           int64  `json:"id" db:"id"`
+	AccountName  string `json:"account_name" db:"account_name"`
+	NumSellItems int    `json:"num_sell_items" db:"num_sell_items"`
 }
 
 type Item struct {
@@ -415,6 +415,32 @@ func getUserSimpleByID(q sqlx.Queryer, userID int64) (userSimple UserSimple, err
 	userSimple.AccountName = user.AccountName
 	userSimple.NumSellItems = user.NumSellItems
 	return userSimple, err
+}
+
+func getUsers(q *sqlx.DB, userIds []int) ([]UserSimple, error){
+	var queryParam string
+	generic := make([]interface{}, 0)
+
+	for _, id := range userIds {
+		queryParam += "?,"
+		generic = append(generic, id)
+	}
+
+	var sql string
+	if queryParam != "" {
+		queryParam = strings.TrimRight(queryParam, ",")
+		sql = fmt.Sprintf("SELECT id, account_name, num_sell_items FROM `users` WHERE `id` IN (%s)", queryParam)
+	} else {
+		sql = "SELECT id, account_name, num_sell_items FROM `users`"
+	}
+
+	users := []UserSimple{}
+	err := q.Select(&users, sql, generic...)
+	if (err != nil) {
+		return nil, err
+	}
+
+	return users, nil
 }
 
 // TODO: 重い 再帰も良くない
@@ -756,29 +782,44 @@ func getNewCategoryItems(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 商品とカテゴリーの紐付けのため、紐付けに必要なカテゴリーを全て取得しておく
-	ids := make(map[int]bool)
+	// 商品と販売ユーザーの紐付けのため、紐付けに必要なカテゴリーを全て取得しておく
+	cIdMap := make(map[int]bool) // 重複排除のため 
+	uIdMap := make(map[int]bool)
 	categoryIds := []int{}
+	userIds := []int{}
 	for _, item := range items {
-		if _, value := ids[item.CategoryID]; !value {
-			ids[item.CategoryID] = true
+		if _, value := cIdMap[item.CategoryID]; !value {
+			cIdMap[item.CategoryID] = true
 			categoryIds = append(categoryIds, item.CategoryID)
 		}
+		if _, value := cIdMap[int(item.SellerID)]; !value {
+			uIdMap[int(item.SellerID)] = true
+			userIds = append(userIds, int(item.SellerID))
+		}
 	}
+
 	categories, err := getCategories(dbx, categoryIds)
 	if err != nil {
 		log.Println(err)
 		outputErrorMsg(w, http.StatusNotFound, "category not found")
 		return
 	}
+	sellers, err := getUsers(dbx, userIds)
+	if err != nil {
+		log.Println(err)
+		outputErrorMsg(w, http.StatusNotFound, "seller not found")
+		return
+	}
 
 	itemSimples := []ItemSimple{}
 	for _, item := range items {
-		// TODO: N + 1
-		seller, err := getUserSimpleByID(dbx, item.SellerID)
-		if err != nil {
-			outputErrorMsg(w, http.StatusNotFound, "seller not found")
-			return
+		var seller UserSimple
+		for _, s := range sellers {
+			if (item.SellerID == s.ID) {
+				seller = s
+			}
 		}
+		
 		var category Category
 		for _, cate := range categories {
 			if (item.CategoryID == cate.ID) {
@@ -1020,6 +1061,7 @@ func getTransactions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 商品とカテゴリーの紐付けのため、紐付けに必要なカテゴリーを全て取得しておく
+	// 商品と販売ユーザーの紐付けのため、紐付けに必要なカテゴリーを全て取得しておく
 	ids := make(map[int]bool)
 	categoryIds := []int{}
 	for _, item := range items {
