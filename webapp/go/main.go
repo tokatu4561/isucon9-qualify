@@ -418,24 +418,16 @@ func getUserSimpleByID(q sqlx.Queryer, userID int64) (userSimple UserSimple, err
 }
 
 func getUsers(q *sqlx.DB, userIds []int) ([]UserSimple, error){
-	var queryParam string
-	generic := make([]interface{}, 0)
-
-	for _, id := range userIds {
-		queryParam += "?,"
-		generic = append(generic, id)
-	}
-
-	var sql string
-	if queryParam != "" {
-		queryParam = strings.TrimRight(queryParam, ",")
-		sql = fmt.Sprintf("SELECT id, account_name, num_sell_items FROM `users` WHERE `id` IN (%s)", queryParam)
+	args := make([]interface{}, 0)
+	var query string
+	if len(userIds) == 0 {
+		query = "SELECT id, account_name, num_sell_items FROM `users`"
 	} else {
-		sql = "SELECT id, account_name, num_sell_items FROM `users`"
+		query, args, _ = sqlx.In("SELECT id, account_name, num_sell_items FROM `users` WHERE `id` IN (?)", userIds)
 	}
 
 	users := []UserSimple{}
-	err := q.Select(&users, sql, generic...)
+	err := q.Select(&users, query, args...)
 	if (err != nil) {
 		return nil, err
 	}
@@ -634,27 +626,42 @@ func getNewItems(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 商品とカテゴリーの紐付けのため、紐付けに必要なカテゴリーを全て取得しておく
-	ids := make(map[int]bool)
+	// 商品と販売ユーザーの紐付けのため、紐付けに必要なカテゴリーを全て取得しておく
+	cIdMap := make(map[int]bool) // 重複排除のため 
+	uIdMap := make(map[int]bool)
 	categoryIds := []int{}
+	userIds := []int{}
 	for _, item := range items {
-		if _, value := ids[item.CategoryID]; !value {
-			ids[item.CategoryID] = true
+		if _, value := cIdMap[item.CategoryID]; !value {
+			cIdMap[item.CategoryID] = true
 			categoryIds = append(categoryIds, item.CategoryID)
 		}
+		if _, value := cIdMap[int(item.SellerID)]; !value {
+			uIdMap[int(item.SellerID)] = true
+			userIds = append(userIds, int(item.SellerID))
+		}
 	}
+
 	categories, err := getCategories(dbx, categoryIds)
 	if err != nil {
+		log.Println(err)
 		outputErrorMsg(w, http.StatusNotFound, "category not found")
+		return
+	}
+	sellers, err := getUsers(dbx, userIds)
+	if err != nil {
+		log.Println(err)
+		outputErrorMsg(w, http.StatusNotFound, "seller not found")
 		return
 	}
 
 	itemSimples := []ItemSimple{}
 	for _, item := range items {
-		//TODO:  N + 1
-		seller, err := getUserSimpleByID(dbx, item.SellerID)
-		if err != nil {
-			outputErrorMsg(w, http.StatusNotFound, "seller not found")
-			return
+		var seller UserSimple
+		for _, s := range sellers {
+			if (item.SellerID == s.ID) {
+				seller = s
+			}
 		}
 
 		var category Category
@@ -792,7 +799,7 @@ func getNewCategoryItems(w http.ResponseWriter, r *http.Request) {
 			cIdMap[item.CategoryID] = true
 			categoryIds = append(categoryIds, item.CategoryID)
 		}
-		if _, value := cIdMap[int(item.SellerID)]; !value {
+		if _, value := uIdMap[int(item.SellerID)]; !value {
 			uIdMap[int(item.SellerID)] = true
 			userIds = append(userIds, int(item.SellerID))
 		}
@@ -867,7 +874,6 @@ func getUserItems(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// N + 1
 	userSimple, err := getUserSimpleByID(dbx, userID)
 	if err != nil {
 		outputErrorMsg(w, http.StatusNotFound, "user not found")
@@ -1061,29 +1067,46 @@ func getTransactions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 商品とカテゴリーの紐付けのため、紐付けに必要なカテゴリーを全て取得しておく
-	// 商品と販売ユーザーの紐付けのため、紐付けに必要なカテゴリーを全て取得しておく
+	// 商品と販売、購入ユーザーの紐付けのため、紐付けに必要なカテゴリーを全て取得しておく
 	ids := make(map[int]bool)
 	categoryIds := []int{}
+	uIdMap := make(map[int]bool)
+	userIds := []int{}
 	for _, item := range items {
 		if _, value := ids[item.CategoryID]; !value {
 			ids[item.CategoryID] = true
 			categoryIds = append(categoryIds, item.CategoryID)
 		}
+		if _, value := uIdMap[int(item.SellerID)]; !value {
+			uIdMap[int(item.SellerID)] = true
+			userIds = append(userIds, int(item.SellerID))
+		}
+		if _, value := uIdMap[int(item.BuyerID)]; !value {
+			uIdMap[int(item.BuyerID)] = true
+			userIds = append(userIds, int(item.BuyerID))
+		}
 	}
+
 	categories, err := getCategories(dbx, categoryIds)
 	if err != nil {
 		outputErrorMsg(w, http.StatusNotFound, "category not found")
 		return
 	}
 
+	users, err := getUsers(dbx, userIds)
+	if err != nil {
+		log.Println(err)
+		outputErrorMsg(w, http.StatusNotFound, "usres not found")
+		return
+	}
+
 	itemDetails := []ItemDetail{}
 	for _, item := range items {
-		// TODO: N + 1
-		seller, err := getUserSimpleByID(tx, item.SellerID)
-		if err != nil {
-			outputErrorMsg(w, http.StatusNotFound, "seller not found")
-			tx.Rollback()
-			return
+		var seller UserSimple
+		for _, s := range users {
+			if (item.SellerID == s.ID) {
+				seller = s
+			}
 		}
 
 		var category Category
@@ -1113,12 +1136,13 @@ func getTransactions(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if item.BuyerID != 0 {
-			buyer, err := getUserSimpleByID(tx, item.BuyerID)
-			if err != nil {
-				outputErrorMsg(w, http.StatusNotFound, "buyer not found")
-				tx.Rollback()
-				return
+			var buyer UserSimple
+			for _, b := range users {
+				if (item.SellerID == b.ID) {
+					seller = b
+				}
 			}
+
 			itemDetail.BuyerID = item.BuyerID
 			itemDetail.Buyer = &buyer
 		}
