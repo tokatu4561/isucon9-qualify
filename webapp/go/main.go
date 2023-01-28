@@ -1525,6 +1525,7 @@ func postBuy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// TODO: 並列化
 	scr, err := APIShipmentCreate(getShipmentServiceURL(), &APIShipmentCreateReq{
 		ToAddress:   buyer.Address,
 		ToName:      buyer.AccountName,
