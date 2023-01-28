@@ -14,7 +14,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
-	"strings"
 	"time"
 
 	_ "net/http/pprof"
@@ -67,6 +66,11 @@ var (
 	templates *template.Template
 	dbx       *sqlx.DB
 	store     sessions.Store
+)
+
+var (
+	allCategories []Category
+	categoryList = make(map[int]Category)
 )
 
 type Config struct {
@@ -329,6 +333,11 @@ func main() {
 	}
 	defer dbx.Close()
 
+	err = loadCategories()
+	if err != nil {
+		log.Fatal(err)
+	}
+
 	mux := goji.NewMux()
 
 	// API
@@ -435,51 +444,44 @@ func getUsers(q *sqlx.DB, userIds []int) ([]UserSimple, error){
 	return users, nil
 }
 
-// TODO: 重い 再帰も良くない
-func getCategoryByID(q sqlx.Queryer, categoryID int) (category Category, err error) {
-	err = sqlx.Get(q, &category, "SELECT * FROM `categories` WHERE `id` = ?", categoryID)
-	if category.ParentID != 0 {
-		parentCategory, err := getCategoryByID(q, category.ParentID)
-		if err != nil {
-			return category, err
-		}
-		category.ParentCategoryName = parentCategory.CategoryName
-	}
-	return category, err
-}
-
-func getCategories(q *sqlx.DB, categoryIds []int) ([]Category, error) {
-	var queryParam string
-	generic := make([]interface{}, 0)
-
-	for _, id := range categoryIds {
-		queryParam += "?,"
-		generic = append(generic, id)
-	}
-
-	var sql string
-	if queryParam != "" {
-		queryParam = strings.TrimRight(queryParam, ",")
-		sql = fmt.Sprintf("SELECT * FROM `categories` WHERE `id` IN (%s)", queryParam)
-	} else {
-		sql = "SELECT * FROM `categories`"
-	}
-
-	categoriesData := []Category{}
-	err := q.Select(&categoriesData, sql, generic...)
-	if (err != nil) {
-		return nil, err
+func loadCategories() error {
+	categories := []Category{}
+	err := dbx.Select(&categories, "SELECT * FROM categories")
+	if err != nil {
+		return err
 	}
 
 	// カテゴリーに親カテゴリーがあれば、再帰的に大元のカテゴリー名までの紐付けを行う
+	for _, c := range categories {
+		categoryList[c.ID] = c
+	}
+
+	for _, c := range categoryList {
+		if c.ParentID != 0 {
+			c.ParentCategoryName = categoryList[c.ParentID].CategoryName
+		}
+		allCategories = append(allCategories, c)
+		categoryList[c.ID] = c
+	}
+
+	return nil
+}
+
+func getCategoryByID(categoryID int) (category Category, err error) {
+	c, ok := categoryList[categoryID]
+	if !ok {
+		return Category{}, sql.ErrNoRows
+	}
+	return c, nil
+}
+
+func getCategories(categoryIds []int) ([]Category, error) {
+	// カテゴリーに親カテゴリーがあれば、大元のカテゴリー名の紐付けを行う
 	categories := []Category{}
-	for _, category := range categoriesData {
-		if category.ParentID != 0 {
-			parentCategory, err := getCategoryByID(q, category.ParentID)
-			if err != nil {
-				return nil, err
-			}
-			category.ParentCategoryName = parentCategory.CategoryName
+	for _, category := range allCategories {
+		category, err := getCategoryByID(category.ParentID)
+		if err != nil {
+			return nil, err
 		}
 		categories = append(categories, category)
 	}
@@ -625,29 +627,16 @@ func getNewItems(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 商品とカテゴリーの紐付けのため、紐付けに必要なカテゴリーを全て取得しておく
 	// 商品と販売ユーザーの紐付けのため、紐付けに必要なカテゴリーを全て取得しておく
-	cIdMap := make(map[int]bool) // 重複排除のため 
 	uIdMap := make(map[int]bool)
-	categoryIds := []int{}
 	userIds := []int{}
 	for _, item := range items {
-		if _, value := cIdMap[item.CategoryID]; !value {
-			cIdMap[item.CategoryID] = true
-			categoryIds = append(categoryIds, item.CategoryID)
-		}
-		if _, value := cIdMap[int(item.SellerID)]; !value {
+		if _, value := uIdMap[int(item.SellerID)]; !value {
 			uIdMap[int(item.SellerID)] = true
 			userIds = append(userIds, int(item.SellerID))
 		}
 	}
 
-	categories, err := getCategories(dbx, categoryIds)
-	if err != nil {
-		log.Println(err)
-		outputErrorMsg(w, http.StatusNotFound, "category not found")
-		return
-	}
 	sellers, err := getUsers(dbx, userIds)
 	if err != nil {
 		log.Println(err)
@@ -665,7 +654,7 @@ func getNewItems(w http.ResponseWriter, r *http.Request) {
 		}
 
 		var category Category
-		for _, cate := range categories {
+		for _, cate := range allCategories {
 			if (item.CategoryID == cate.ID) {
 				category = cate
 			}
@@ -709,14 +698,18 @@ func getNewCategoryItems(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rootCategory, err := getCategoryByID(dbx, rootCategoryID)
+	rootCategory, err := getCategoryByID(rootCategoryID)
 	if err != nil || rootCategory.ParentID != 0 {
 		outputErrorMsg(w, http.StatusNotFound, "category not found")
 		return
 	}
 
 	var categoryIDs []int
-	err = dbx.Select(&categoryIDs, "SELECT id FROM `categories` WHERE parent_id=?", rootCategory.ID)
+	for _, c := range allCategories {
+		if (c.ParentID == rootCategory.ID) {
+			categoryIDs = append(categoryIDs, c.ID)
+		}
+	}
 	if err != nil {
 		log.Print(err)
 		outputErrorMsg(w, http.StatusInternalServerError, "db error")
@@ -788,29 +781,17 @@ func getNewCategoryItems(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 商品とカテゴリーの紐付けのため、紐付けに必要なカテゴリーを全て取得しておく
 	// 商品と販売ユーザーの紐付けのため、紐付けに必要なカテゴリーを全て取得しておく
-	cIdMap := make(map[int]bool) // 重複排除のため 
 	uIdMap := make(map[int]bool)
-	categoryIds := []int{}
 	userIds := []int{}
 	for _, item := range items {
-		if _, value := cIdMap[item.CategoryID]; !value {
-			cIdMap[item.CategoryID] = true
-			categoryIds = append(categoryIds, item.CategoryID)
-		}
+		
 		if _, value := uIdMap[int(item.SellerID)]; !value {
 			uIdMap[int(item.SellerID)] = true
 			userIds = append(userIds, int(item.SellerID))
 		}
 	}
 
-	categories, err := getCategories(dbx, categoryIds)
-	if err != nil {
-		log.Println(err)
-		outputErrorMsg(w, http.StatusNotFound, "category not found")
-		return
-	}
 	sellers, err := getUsers(dbx, userIds)
 	if err != nil {
 		log.Println(err)
@@ -828,7 +809,7 @@ func getNewCategoryItems(w http.ResponseWriter, r *http.Request) {
 		}
 		
 		var category Category
-		for _, cate := range categories {
+		for _, cate := range allCategories {
 			if (item.CategoryID == cate.ID) {
 				category = cate
 			}
@@ -937,26 +918,10 @@ func getUserItems(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 商品とカテゴリーの紐付けのため、紐付けに必要なカテゴリーを全て取得しておく
-	ids := make(map[int]bool)
-	categoryIds := []int{}
-	for _, item := range items {
-		if _, value := ids[item.CategoryID]; !value {
-			ids[item.CategoryID] = true
-			categoryIds = append(categoryIds, item.CategoryID)
-		}
-	}
-	categories, err := getCategories(dbx, categoryIds)
-	if err != nil {
-		log.Println(err, categoryIds)
-		outputErrorMsg(w, http.StatusNotFound, "category not found")
-		return
-	}
-
 	itemSimples := []ItemSimple{}
 	for _, item := range items {
 		var category Category
-		for _, cate := range categories {
+		for _, cate := range allCategories {
 			if (item.CategoryID == cate.ID) {
 				category = cate
 			}
@@ -1066,17 +1031,10 @@ func getTransactions(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 商品とカテゴリーの紐付けのため、紐付けに必要なカテゴリーを全て取得しておく
 	// 商品と販売、購入ユーザーの紐付けのため、紐付けに必要なカテゴリーを全て取得しておく
-	ids := make(map[int]bool)
-	categoryIds := []int{}
 	uIdMap := make(map[int]bool)
 	userIds := []int{}
 	for _, item := range items {
-		if _, value := ids[item.CategoryID]; !value {
-			ids[item.CategoryID] = true
-			categoryIds = append(categoryIds, item.CategoryID)
-		}
 		if _, value := uIdMap[int(item.SellerID)]; !value {
 			uIdMap[int(item.SellerID)] = true
 			userIds = append(userIds, int(item.SellerID))
@@ -1085,12 +1043,6 @@ func getTransactions(w http.ResponseWriter, r *http.Request) {
 			uIdMap[int(item.BuyerID)] = true
 			userIds = append(userIds, int(item.BuyerID))
 		}
-	}
-
-	categories, err := getCategories(dbx, categoryIds)
-	if err != nil {
-		outputErrorMsg(w, http.StatusNotFound, "category not found")
-		return
 	}
 
 	users, err := getUsers(dbx, userIds)
@@ -1110,7 +1062,7 @@ func getTransactions(w http.ResponseWriter, r *http.Request) {
 		}
 
 		var category Category
-		for _, cate := range categories {
+		for _, cate := range allCategories {
 			if (item.CategoryID == cate.ID) {
 				category = cate
 			}
@@ -1232,7 +1184,7 @@ func getItem(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	category, err := getCategoryByID(dbx, item.CategoryID)
+	category, err := getCategoryByID(item.CategoryID)
 	if err != nil {
 		outputErrorMsg(w, http.StatusNotFound, "category not found")
 		return
@@ -1520,7 +1472,7 @@ func postBuy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	category, err := getCategoryByID(tx, targetItem.CategoryID)
+	category, err := getCategoryByID(targetItem.CategoryID)
 	if err != nil {
 		log.Print(err)
 
@@ -2118,7 +2070,7 @@ func postSell(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	category, err := getCategoryByID(dbx, categoryID)
+	category, err := getCategoryByID(categoryID)
 	if err != nil || category.ParentID == 0 {
 		log.Print(categoryID, category)
 		outputErrorMsg(w, http.StatusBadRequest, "Incorrect category ID")
@@ -2342,15 +2294,7 @@ func getSettings(w http.ResponseWriter, r *http.Request) {
 
 	ress.PaymentServiceURL = getPaymentServiceURL()
 
-	categories := []Category{}
-
-	err := dbx.Select(&categories, "SELECT * FROM `categories`")
-	if err != nil {
-		log.Print(err)
-		outputErrorMsg(w, http.StatusInternalServerError, "db error")
-		return
-	}
-	ress.Categories = categories
+	ress.Categories = allCategories
 
 	w.Header().Set("Content-Type", "application/json;charset=utf-8")
 	json.NewEncoder(w).Encode(ress)
