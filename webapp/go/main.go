@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"sync"
 	"time"
 
 	_ "net/http/pprof"
@@ -1526,19 +1527,20 @@ func postBuy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// TODO: 並列化
-	scr, err := APIShipmentCreate(getShipmentServiceURL(), &APIShipmentCreateReq{
-		ToAddress:   buyer.Address,
-		ToName:      buyer.AccountName,
-		FromAddress: seller.Address,
-		FromName:    seller.AccountName,
-	})
-	if err != nil {
-		log.Print(err)
-		outputErrorMsg(w, http.StatusInternalServerError, "failed to request to shipment service")
-		tx.Rollback()
+	var scr *APIShipmentCreateRes
+	var scsErr error
+	var wg sync.WaitGroup
 
-		return
-	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		scr, scsErr = APIShipmentCreate(getShipmentServiceURL(), &APIShipmentCreateReq{
+			ToAddress:   buyer.Address,
+			ToName:      buyer.AccountName,
+			FromAddress: seller.Address,
+			FromName:    seller.AccountName,
+		})
+	}()
 
 	pstr, err := APIPaymentToken(getPaymentServiceURL(), &APIPaymentServiceTokenReq{
 		ShopID: PaymentServiceIsucariShopID,
@@ -1551,6 +1553,15 @@ func postBuy(w http.ResponseWriter, r *http.Request) {
 
 		outputErrorMsg(w, http.StatusInternalServerError, "payment service is failed")
 		tx.Rollback()
+		return
+	}
+
+	wg.Wait()
+	if scsErr != nil {
+		log.Print(err)
+		outputErrorMsg(w, http.StatusInternalServerError, "failed to request to shipment service")
+		tx.Rollback()
+
 		return
 	}
 
